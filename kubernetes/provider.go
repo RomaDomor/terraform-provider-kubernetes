@@ -360,6 +360,9 @@ func Provider() *schema.Provider {
 
 			//node
 			"kubernetes_runtime_class_v1": resourceKubernetesRuntimeClassV1(),
+
+			// patterns
+			"kubernetes_api_gateway_v1": resourceKubernetesAPIGatewayV1(),
 		},
 	}
 
