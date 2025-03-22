@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"log"
 	"strings"
 	"time"
@@ -98,6 +99,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 			MaxItems: 1,
 			Elem: &schema.Resource{
 				Schema: map[string]*schema.Schema{
+					"metadata": namespacedComputedMetadataSchema("circuit_breaker"),
 					"metric": {
 						Type:         schema.TypeString,
 						Optional:     true,
@@ -108,6 +110,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"latency_quantile": {
 						Type:     schema.TypeFloat,
 						Optional: true,
+						Computed: true,
 						//Default:     50.0,
 						Description: "For the latency metric: the quantile to evaluate (e.g., 50.0 for the median). Must be between 0 and 100.",
 						ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
@@ -121,6 +124,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"latency_threshold": {
 						Type:     schema.TypeInt,
 						Optional: true,
+						Computed: true,
 						//Default:      100,
 						Description:  "For the latency metric: the threshold in milliseconds above which the circuit breaker will open.",
 						ValidateFunc: validation.IntAtLeast(1),
@@ -128,6 +132,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"network_error_threshold": {
 						Type:     schema.TypeFloat,
 						Optional: true,
+						Computed: true,
 						//Default:     0.30,
 						Description: "For the network error metric: the error ratio threshold. Must be between 0 and 1.",
 						ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
@@ -141,6 +146,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"response_code_from": {
 						Type:     schema.TypeInt,
 						Optional: true,
+						Computed: true,
 						//Default:      500,
 						Description:  "For the response code metric: the starting HTTP status code (inclusive) for evaluation. Must be between 100 and 599.",
 						ValidateFunc: validation.IntBetween(100, 599),
@@ -148,6 +154,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"response_code_to": {
 						Type:     schema.TypeInt,
 						Optional: true,
+						Computed: true,
 						//Default:      600,
 						Description:  "For the response code metric: the ending HTTP status code (exclusive) for evaluation. Must be between 101 and 600.",
 						ValidateFunc: validation.IntBetween(101, 600),
@@ -155,6 +162,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"divided_by_from": {
 						Type:     schema.TypeInt,
 						Optional: true,
+						Computed: true,
 						//Default:      0,
 						Description:  "For the response code metric: the starting HTTP status code (inclusive) of the denominator range. Must be >= 0.",
 						ValidateFunc: validation.IntAtLeast(0),
@@ -162,6 +170,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"divided_by_to": {
 						Type:     schema.TypeInt,
 						Optional: true,
+						Computed: true,
 						//Default:      600,
 						Description:  "For the response code metric: the ending HTTP status code (exclusive) of the denominator range. Must be between 1 and 600.",
 						ValidateFunc: validation.IntBetween(1, 600),
@@ -169,6 +178,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 					"response_code_threshold": {
 						Type:     schema.TypeFloat,
 						Optional: true,
+						Computed: true,
 						//Default:     0.25,
 						Description: "For the response code metric: the ratio threshold above which the circuit breaker will open. Must be between 0 and 1.",
 						ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
@@ -201,9 +211,9 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 						ValidateFunc: validateDurationString,
 					},
 					"response_code": {
-						Type:         schema.TypeInt,
-						Optional:     true,
-						Default:      503,
+						Type:     schema.TypeInt,
+						Optional: true,
+						//Default:      503,
 						Description:  "The HTTP status code returned when the circuit breaker is open. Must be between 100 and 599.",
 						ValidateFunc: validation.IntBetween(100, 599),
 					},
@@ -255,6 +265,26 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 	}
 }
 
+func namespacedComputedMetadataSchema(objectName string) *schema.Schema {
+	fields := metadataFields(objectName)
+	fields["namespace"] = &schema.Schema{
+		Type:        schema.TypeString,
+		Description: fmt.Sprintf("Namespace defines the space within which name of the %s must be unique.", objectName),
+		Optional:    true,
+		ForceNew:    true,
+		Default:     "default",
+	}
+
+	return &schema.Schema{
+		Type:        schema.TypeList,
+		Description: fmt.Sprintf("Standard %s's metadata. More info: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#metadata", objectName),
+		Computed:    true,
+		Elem: &schema.Resource{
+			Schema: fields,
+		},
+	}
+}
+
 // validateDurationString validates that the provided string is a valid duration.
 func validateDurationString(val interface{}, key string) (warns []string, errs []error) {
 	s, ok := val.(string)
@@ -269,13 +299,11 @@ func validateDurationString(val interface{}, key string) (warns []string, errs [
 }
 
 func resourceKubernetesAPIGatewayV1Create(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	// Get the main Kubernetes client (for Ingress objects)
+	// Retrieve the Kubernetes clients
 	conn, err := meta.(KubeClientsets).MainClientset()
 	if err != nil {
 		return diag.FromErr(err)
 	}
-
-	// Get the dynamic client for creating CRDs (like Traefik Middleware)
 	dynClient, err := meta.(KubeClientsets).DynamicClient()
 	if err != nil {
 		return diag.FromErr(err)
@@ -507,6 +535,10 @@ func resourceKubernetesAPIGatewayV1Read(ctx context.Context, d *schema.ResourceD
 				if err != nil {
 					if errors.IsNotFound(err) {
 						log.Printf("[DEBUG] Circuit breaker middleware %q not found", mwName)
+						err = d.Set("circuit_breaker", nil)
+						if err != nil {
+							return diag.FromErr(err)
+						}
 					} else {
 						return diag.Errorf("Failed to read circuit breaker middleware %q: %s", mwName, err)
 					}
@@ -516,6 +548,14 @@ func resourceKubernetesAPIGatewayV1Read(ctx context.Context, d *schema.ResourceD
 					if err != nil || !found {
 						log.Printf("[DEBUG] Circuit breaker spec not found in middleware %q", mwName)
 					} else {
+						// Extract the metadata field from the unstructured object
+						metadata, found, err := unstructured.NestedMap(middlewareObj.Object, "metadata")
+						if err != nil || !found {
+							return diag.Errorf("could not extract metadata: %v", err)
+						}
+						objMeta := convertToObjectMeta(metadata)
+						flattenedMetadata := flattenMetadataFields(objMeta)
+
 						expression, _, _ := unstructured.NestedString(spec, "expression")
 						checkPeriod, _, _ := unstructured.NestedString(spec, "checkPeriod")
 						fallbackDuration, _, _ := unstructured.NestedString(spec, "fallbackDuration")
@@ -523,12 +563,14 @@ func resourceKubernetesAPIGatewayV1Read(ctx context.Context, d *schema.ResourceD
 						responseCode, _, _ := unstructured.NestedInt64(spec, "responseCode")
 						// Build a map representing the circuit breaker configuration.
 						cbMap := map[string]interface{}{
+							"metadata": flattenedMetadata,
 							//"expression":        expression,
 							"check_period":      checkPeriod,
 							"fallback_duration": fallbackDuration,
 							"recovery_duration": recoveryDuration,
 							"response_code":     int(responseCode),
 						}
+
 						// Reverse-engineer the generic metric settings from the computed expression.
 						if strings.HasPrefix(expression, "LatencyAtQuantileMS(") {
 							var quantile float64
@@ -599,60 +641,167 @@ func resourceKubernetesAPIGatewayV1Read(ctx context.Context, d *schema.ResourceD
 	return nil
 }
 
+func convertToObjectMeta(metadata map[string]interface{}) metav1.ObjectMeta {
+	objMeta := metav1.ObjectMeta{}
+
+	if name, ok := metadata["name"].(string); ok {
+		objMeta.Name = name
+	}
+	if generateName, ok := metadata["generateName"].(string); ok {
+		objMeta.GenerateName = generateName
+	}
+	if namespace, ok := metadata["namespace"].(string); ok {
+		objMeta.Namespace = namespace
+	}
+	if selfLink, ok := metadata["selfLink"].(string); ok {
+		objMeta.SelfLink = selfLink
+	}
+	if uid, ok := metadata["uid"].(string); ok {
+		objMeta.UID = types.UID(uid)
+	}
+	if resourceVersion, ok := metadata["resourceVersion"].(string); ok {
+		objMeta.ResourceVersion = resourceVersion
+	}
+	if generation, ok := metadata["generation"].(int64); ok {
+		objMeta.Generation = generation
+	}
+	if labels, ok := metadata["labels"].(map[string]interface{}); ok {
+		objMeta.Labels = make(map[string]string)
+		for key, value := range labels {
+			if strVal, ok := value.(string); ok {
+				objMeta.Labels[key] = strVal
+			}
+		}
+	}
+	if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
+		objMeta.Annotations = make(map[string]string)
+		for key, value := range annotations {
+			if strVal, ok := value.(string); ok {
+				objMeta.Annotations[key] = strVal
+			}
+		}
+	}
+	if finalizers, ok := metadata["finalizers"].([]interface{}); ok {
+		for _, finalizer := range finalizers {
+			if strVal, ok := finalizer.(string); ok {
+				objMeta.Finalizers = append(objMeta.Finalizers, strVal)
+			}
+		}
+	}
+	if managedFields, ok := metadata["managedFields"].([]interface{}); ok {
+		objMeta.ManagedFields = []metav1.ManagedFieldsEntry{}
+		for _, field := range managedFields {
+			if fieldMap, ok := field.(map[string]interface{}); ok {
+				managedField := metav1.ManagedFieldsEntry{}
+				if manager, ok := fieldMap["manager"].(string); ok {
+					managedField.Manager = manager
+				}
+				objMeta.ManagedFields = append(objMeta.ManagedFields, managedField)
+			}
+		}
+	}
+
+	// Handle timestamps
+	if creationTimestamp, ok := metadata["creationTimestamp"].(string); ok {
+		if parsedTime, err := time.Parse(time.RFC3339, creationTimestamp); err == nil {
+			objMeta.CreationTimestamp = metav1.Time{Time: parsedTime}
+		}
+	}
+	if deletionTimestamp, ok := metadata["deletionTimestamp"].(string); ok {
+		if parsedTime, err := time.Parse(time.RFC3339, deletionTimestamp); err == nil {
+			objMeta.DeletionTimestamp = &metav1.Time{Time: parsedTime}
+		}
+	}
+
+	return objMeta
+}
+
 func resourceKubernetesAPIGatewayV1Update(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	// Get the main Kubernetes client (for Ingress objects)
+	// Retrieve the Kubernetes clients
 	conn, err := meta.(KubeClientsets).MainClientset()
 	if err != nil {
 		return diag.FromErr(err)
 	}
-
-	// Get the dynamic client for creating CRDs (like Traefik Middleware)
 	dynClient, err := meta.(KubeClientsets).DynamicClient()
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
+	// Extract namespace and name from resource ID
 	namespace, name, err := idParts(d.Id())
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	// Extract values from the Terraform schema
+	// Extract domain and routes from Terraform schema
 	domain := d.Get("domain").(string)
-
-	// Define Ingress rules
 	routes := d.Get("route").([]interface{})
 	paths := createIngressRules(routes)
 
-	// Prepare annotations
-	annotations := map[string]string{}
-
-	// TODO: Delete existing Circuit Breaker if existed but removed
-	// Redeploy Circuit Breaker if required
-	circuitBreaker := d.Get("circuit_breaker").([]interface{})
-	if len(circuitBreaker) > 0 {
-		// Update Traefik middleware for circuit breaking.
-		obj := getCircuitBreakerObject(namespace, name, circuitBreaker)
-		_, err := dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Update(ctx, obj, metav1.UpdateOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				_, err := dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
-				if err != nil {
-					return diag.Errorf("Failed to create Circuit Breaker: %s", err)
-				}
-			} else {
-				return diag.Errorf("Failed to update Circuit Breaker: %s", err)
-			}
-		}
-
-		// Reference the middleware in the Ingress via annotation.
-		// Traefik expects: traefik.ingress.kubernetes.io/router.middlewares: "namespace/middleware-name"
-		annotations["traefik.ingress.kubernetes.io/router.middlewares"] = fmt.Sprintf("%s-%s-circuit-breaker@kubernetescrd", namespace, name)
+	// Fetch the existing Ingress to retain annotations
+	existingIngress, err := conn.NetworkingV1().Ingresses(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return diag.Errorf("Failed to retrieve existing Ingress '%s': %s", name, err)
 	}
 
-	ingress := getIngressObject(namespace, name, annotations, domain, paths)
+	// Preserve existing annotations if present
+	annotations := map[string]string{}
+	if existingIngress != nil && existingIngress.Annotations != nil {
+		annotations = existingIngress.Annotations
+	}
 
-	// Update the API Gateway resource
+	// Handle circuit breaker updates
+	if d.HasChange("circuit_breaker") {
+		oldCB, newCB := d.GetChange("circuit_breaker")
+		oldExists := oldCB != nil && len(oldCB.([]interface{})) > 0
+		newExists := newCB != nil && len(newCB.([]interface{})) > 0
+
+		middlewareName := fmt.Sprintf("%s-circuit-breaker", name)
+		if oldExists && !newExists {
+			log.Printf("[INFO] Circuit breaker was removed, deleting middleware")
+			err = dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Delete(ctx, middlewareName, metav1.DeleteOptions{})
+			if err != nil && !errors.IsNotFound(err) {
+				return diag.Errorf("Failed to delete middleware %q: %s", middlewareName, err)
+			}
+			delete(annotations, "traefik.ingress.kubernetes.io/router.middlewares")
+		} else if newExists {
+			log.Printf("[INFO] Creating or updating Circuit Breaker")
+			obj := getCircuitBreakerObject(namespace, name, newCB.([]interface{}))
+			if oldExists {
+				cbList, ok := oldCB.([]interface{})
+				if !ok || len(cbList) == 0 {
+					return diag.Errorf("oldCB is not a valid slice or is empty")
+				}
+				metadata, err := getMetadata(cbList[0])
+				if err != nil {
+					return diag.Errorf("Failed to extract metadata: %s", err)
+				}
+
+				resourceVersion, ok := metadata["resource_version"].(string)
+				if !ok {
+					return diag.Errorf("resource_version is missing or not a string in metadata")
+				}
+
+				obj.SetResourceVersion(resourceVersion)
+			}
+			_, err := dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Update(ctx, obj, metav1.UpdateOptions{})
+			if err != nil {
+				if errors.IsNotFound(err) {
+					_, err := dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+					if err != nil {
+						return diag.Errorf("Failed to create Circuit Breaker: %s", err)
+					}
+				} else {
+					return diag.Errorf("Failed to update Circuit Breaker: %s", err)
+				}
+			}
+			// Ensure the annotation is set
+			annotations["traefik.ingress.kubernetes.io/router.middlewares"] = fmt.Sprintf("%s-%s-circuit-breaker@kubernetescrd", namespace, name)
+		}
+	}
+
+	// Update the Ingress
+	ingress := getIngressObject(namespace, name, annotations, domain, paths)
 	updatedGateway, err := conn.NetworkingV1().Ingresses(namespace).Update(ctx, ingress, metav1.UpdateOptions{})
 	if err != nil {
 		return diag.Errorf("Failed to update API Gateway '%s' because: %s", buildId(ingress.ObjectMeta), err)
@@ -662,13 +811,33 @@ func resourceKubernetesAPIGatewayV1Update(ctx context.Context, d *schema.Resourc
 	return resourceKubernetesAPIGatewayV1Read(ctx, d, meta)
 }
 
+func getMetadata(o interface{}) (map[string]interface{}, error) {
+	obj, ok := o.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected a map, but got: %T", o)
+	}
+
+	// Ensure metadata is a valid list and contains at least one element
+	metadataList, ok := obj["metadata"].([]interface{})
+	if !ok || len(metadataList) == 0 {
+		return nil, fmt.Errorf("metadata is not a valid list or is empty")
+	}
+
+	// Ensure the first element of metadataList is a map
+	metadata, ok := metadataList[0].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected metadata to be a map, but got: %T", metadataList[0])
+	}
+
+	return metadata, nil
+}
+
 func resourceKubernetesAPIGatewayV1Delete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	// Retrieve the Kubernetes clients
 	conn, err := meta.(KubeClientsets).MainClientset()
 	if err != nil {
 		return diag.FromErr(err)
 	}
-
-	// Get the dynamic client for creating CRDs (like Traefik Middleware)
 	dynClient, err := meta.(KubeClientsets).DynamicClient()
 	if err != nil {
 		return diag.FromErr(err)
@@ -704,15 +873,31 @@ func resourceKubernetesAPIGatewayV1Delete(ctx context.Context, d *schema.Resourc
 		return diag.FromErr(err)
 	}
 
-	// Delete middleware
-	middlewareName := fmt.Sprintf("%s-circuit-breaker", name)
-	err = dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Delete(ctx, middlewareName, metav1.DeleteOptions{})
-	if err != nil {
-		// If the resource is not found, consider it already deleted.
-		if errors.IsNotFound(err) {
-			return nil
+	// Check if circuit_breaker was previously set by checking length
+	if cb, ok := d.Get("circuit_breaker").([]interface{}); ok && len(cb) > 0 {
+		log.Printf("[INFO] Circuit breaker was configured, deleting middleware")
+
+		middlewareName := fmt.Sprintf("%s-circuit-breaker", name)
+		err = dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Delete(ctx, middlewareName, metav1.DeleteOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return diag.Errorf("Failed to delete middleware %q: %s", middlewareName, err)
 		}
-		return diag.Errorf("failed to delete middleware %q: %s", middlewareName, err)
+
+		// Wait until the middleware is fully removed
+		err = retry.RetryContext(ctx, d.Timeout(schema.TimeoutDelete), func() *retry.RetryError {
+			_, err := dynClient.Resource(traefikMiddlewareGVR).Namespace(namespace).Get(ctx, middlewareName, metav1.GetOptions{})
+			if errors.IsNotFound(err) {
+				return nil // Middleware is fully deleted
+			}
+			if err != nil {
+				return retry.NonRetryableError(err)
+			}
+			return retry.RetryableError(fmt.Errorf("Circuit Breaker (%s) still exists", middlewareName))
+		})
+
+		if err != nil {
+			return diag.FromErr(err)
+		}
 	}
 
 	log.Printf("[INFO] API Gateway %s deleted", name)
