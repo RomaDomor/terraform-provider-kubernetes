@@ -57,6 +57,7 @@ func resourceKubernetesAPIGatewaySchemaV1() map[string]*schema.Schema {
 			Type:        schema.TypeString,
 			Optional:    true,
 			Default:     "default",
+			ForceNew:    true,
 			Description: "The Kubernetes namespace where the API gateway should be deployed. Defaults to 'default'.",
 		},
 		"name": {
